@@ -55,5 +55,5 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add public/eu-profiles.json
-          git diff --cached --quiet || git commit -m "chore: update eu-profiles.json [skip ci]"
+          git diff --cached --quiet || git commit -m "chore: update eu-profiles.json"
           git push
