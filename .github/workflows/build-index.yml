@@ -46,8 +46,8 @@ jobs:
 
       - name: Generate eu-profiles.json index
         run: |
-          node /tmp/cli/node_modules/.bin/complies-with-eu search --json \
-            > web/public/eu-profiles.json
+          node /tmp/cli/node_modules/.bin/complies-with-eu build-index \
+            --output web/public/eu-profiles.json
 
       - name: Commit & push index
         working-directory: web
