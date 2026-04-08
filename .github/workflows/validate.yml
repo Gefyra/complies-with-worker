@@ -1,0 +1,87 @@
+name: Validate FHIR Profile
+
+on:
+  repository_dispatch:
+    types: [validate]
+
+concurrency:
+  group: validate-${{ github.event.client_payload.hash }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Setup Node 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Cache FHIR packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.fhir/packages
+          key: fhir-packages-${{ github.event.client_payload.package }}
+          restore-keys: fhir-packages-
+
+      - name: Cache tools (validator CLI jar)
+        uses: actions/cache@v4
+        with:
+          path: ~/.complies-with-eu/tools
+          key: tools-v1
+
+      - name: Install complies-with-eu (private)
+        run: |
+          npm install --prefix /tmp/cli \
+            git+https://x-access-token:${{ secrets.CLI_PAT }}@github.com/Gefyra/complies-with-eu.git
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.CLI_PAT }}
+
+      - name: Init (download EU packages)
+        run: |
+          node /tmp/cli/node_modules/.bin/complies-with-eu init
+        env:
+          HOME: /root
+
+      - name: Run validation
+        id: validate
+        run: |
+          node /tmp/cli/node_modules/.bin/complies-with-eu validate \
+            "${{ github.event.client_payload.package }}" \
+            "${{ github.event.client_payload.canonical }}" \
+            --eu-profiles "${{ github.event.client_payload.euProfiles }}" \
+            --json \
+            --output /tmp/result.json
+        env:
+          HOME: /root
+
+      - name: Read result
+        id: result
+        run: |
+          RESULT=$(cat /tmp/result.json)
+          echo "json<<EOF" >> $GITHUB_OUTPUT
+          echo "$RESULT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: POST result to callback
+        run: |
+          curl -X POST "${{ github.event.client_payload.callbackUrl }}" \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
+            -d "{\"hash\":\"${{ github.event.client_payload.hash }}\",\"result\":$(cat /tmp/result.json)}"
+
+      - name: POST failure to callback
+        if: failure()
+        run: |
+          curl -X POST "${{ github.event.client_payload.callbackUrl }}" \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
+            -d "{\"hash\":\"${{ github.event.client_payload.hash }}\",\"error\":\"Validation job failed. Check GitHub Actions logs.\"}"

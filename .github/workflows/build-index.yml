@@ -1,0 +1,61 @@
+name: Build EU Profile Index
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'   # every Monday at 03:00 UTC
+  workflow_dispatch:        # manual trigger
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout complies-with-eu-web
+        uses: actions/checkout@v4
+        with:
+          repository: Gefyra/complies-with-eu-web
+          token: ${{ secrets.WEB_REPO_PAT }}
+          path: web
+
+      - name: Setup Node 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Cache FHIR packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.fhir/packages
+          key: fhir-packages-eu-index-v1
+          restore-keys: fhir-packages-
+
+      - name: Install complies-with-eu (private)
+        run: |
+          npm install --prefix /tmp/cli \
+            git+https://x-access-token:${{ secrets.CLI_PAT }}@github.com/Gefyra/complies-with-eu.git
+
+      - name: Init (download EU packages)
+        run: node /tmp/cli/node_modules/.bin/complies-with-eu init
+        env:
+          HOME: /root
+
+      - name: Generate eu-profiles.json index
+        run: |
+          node /tmp/cli/node_modules/.bin/complies-with-eu search --json \
+            > web/public/eu-profiles.json
+
+      - name: Commit & push index
+        working-directory: web
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/eu-profiles.json
+          git diff --cached --quiet || git commit -m "chore: update eu-profiles.json [skip ci]"
+          git push
