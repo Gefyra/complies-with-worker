@@ -46,10 +46,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.CLI_PAT }}
 
       - name: Init (download EU packages)
-        run: |
-          node /tmp/cli/node_modules/.bin/complies-with-eu init
-        env:
-          HOME: /root
+        run: node /tmp/cli/node_modules/.bin/complies-with-eu init
 
       - name: Run validation
         id: validate
