@@ -57,8 +57,6 @@ jobs:
             --eu-profiles "${{ github.event.client_payload.euProfiles }}" \
             --json \
             --output /tmp/result.json
-        env:
-          HOME: /root
 
       - name: Read result
         id: result
