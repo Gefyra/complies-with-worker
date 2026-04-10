@@ -40,7 +40,7 @@ jobs:
 
       - name: Install complies-with-eu (private)
         run: |
-          npm install --prefix /tmp/cli \
+          npm install --prefer-online --prefix /tmp/cli \
             git+https://x-access-token:${{ secrets.CLI_PAT }}@github.com/Gefyra/complies-with-eu.git
         env:
           NODE_AUTH_TOKEN: ${{ secrets.CLI_PAT }}
