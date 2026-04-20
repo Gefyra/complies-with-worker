@@ -1,4 +1,5 @@
 name: Validate FHIR Profile
+run-name: "Validate ${{ github.event.client_payload.canonical }}"
 
 on:
   repository_dispatch:
