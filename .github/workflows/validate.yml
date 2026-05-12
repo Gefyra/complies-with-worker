@@ -51,6 +51,9 @@ jobs:
 
       - name: Run validation
         id: validate
+        env:
+          COMPLIES_WITH_EU_VALIDATOR_SERVER: ${{ secrets.VALIDATOR_SERVER_URL }}
+          COMPLIES_WITH_EU_VALIDATOR_TOKEN: ${{ secrets.VALIDATOR_TOKEN }}
         run: |
           node /tmp/cli/node_modules/.bin/complies-with-eu validate \
             "${{ github.event.client_payload.package }}" \
