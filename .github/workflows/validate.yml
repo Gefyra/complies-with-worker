@@ -5,82 +5,111 @@ on:
   repository_dispatch:
     types: [validate]
 
+permissions:
+  contents: read
+
 concurrency:
   group: validate-${{ github.event.client_payload.hash }}
   cancel-in-progress: false
+
+env:
+  # Published CLI version (https://www.npmjs.com/package/@gefyra/complies-with-eu).
+  CLI_VERSION: 1.2.0
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    # Payload values come from users of the web UI. They are passed to the shell
+    # only through environment variables, never via ${{ }} inside run scripts,
+    # to rule out shell injection.
+    env:
+      PAYLOAD_HASH: ${{ github.event.client_payload.hash }}
+      PAYLOAD_PACKAGE: ${{ github.event.client_payload.package }}
+      PAYLOAD_CANONICAL: ${{ github.event.client_payload.canonical }}
+      PAYLOAD_EU_PROFILES: ${{ github.event.client_payload.euProfiles }}
+      PAYLOAD_CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
+
     steps:
-      - name: Setup Node 18
-        uses: actions/setup-node@v4
+      - name: Check payload
+        run: |
+          url_re='^https?://[A-Za-z0-9._~:/?#@!&+,=%-]+$'
+          [[ "$PAYLOAD_HASH" =~ ^[a-f0-9]{64}$ ]] || { echo "::error::invalid hash"; exit 1; }
+          [[ "$PAYLOAD_PACKAGE" =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$ ]] || { echo "::error::invalid package"; exit 1; }
+          [[ "$PAYLOAD_CANONICAL" =~ $url_re ]] || { echo "::error::invalid canonical"; exit 1; }
+          for v in "$PAYLOAD_HASH" "$PAYLOAD_PACKAGE" "$PAYLOAD_CANONICAL" "$PAYLOAD_EU_PROFILES" "$PAYLOAD_CALLBACK_URL"; do
+            [[ "$v" != *[[:cntrl:]]* ]] || { echo "::error::control characters in payload"; exit 1; }
+          done
+          IFS=',' read -ra profiles <<< "$PAYLOAD_EU_PROFILES"
+          [ "${#profiles[@]}" -gt 0 ] || { echo "::error::no EU profiles"; exit 1; }
+          for p in "${profiles[@]}"; do
+            [[ "$p" =~ $url_re ]] || { echo "::error::invalid EU profile"; exit 1; }
+          done
+          [[ "$PAYLOAD_CALLBACK_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/api/callback$ ]] || { echo "::error::invalid callback URL"; exit 1; }
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
         with:
-          node-version: '18'
+          node-version: '24'
 
       - name: Setup Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: '21'
 
       - name: Cache FHIR packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.fhir/packages
           key: fhir-packages-${{ github.event.client_payload.package }}
           restore-keys: fhir-packages-
 
-      - name: Cache tools (validator CLI jar)
-        uses: actions/cache@v4
+      - name: Cache tools (validator CLI jar, fhir-pkg-tool)
+        uses: actions/cache@v6
         with:
           path: ~/.complies-with-eu/tools
-          key: tools-v1
+          key: tools-${{ env.CLI_VERSION }}
+          restore-keys: tools-
 
-      - name: Install complies-with-eu (private)
-        run: |
-          npm install --prefer-online --prefix /tmp/cli \
-            git+https://x-access-token:${{ secrets.CLI_PAT }}@github.com/Gefyra/complies-with-eu.git
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.CLI_PAT }}
+      - name: Install complies-with-eu
+        run: npm install -g "@gefyra/complies-with-eu@${CLI_VERSION}"
 
-      - name: Init (download EU packages)
-        run: node /tmp/cli/node_modules/.bin/complies-with-eu init
+      - name: Init (download tools and EU packages)
+        run: complies-with-eu init
 
       - name: Run validation
-        id: validate
-        env:
-          COMPLIES_WITH_EU_VALIDATOR_SERVER: ${{ secrets.VALIDATOR_SERVER_URL }}
-          COMPLIES_WITH_EU_VALIDATOR_TOKEN: ${{ secrets.VALIDATOR_TOKEN }}
         run: |
-          node /tmp/cli/node_modules/.bin/complies-with-eu validate \
-            "${{ github.event.client_payload.package }}" \
-            "${{ github.event.client_payload.canonical }}" \
-            --eu-profiles "${{ github.event.client_payload.euProfiles }}" \
+          complies-with-eu validate "$PAYLOAD_PACKAGE" "$PAYLOAD_CANONICAL" \
+            --eu-profiles "$PAYLOAD_EU_PROFILES" \
             --json \
             --output /tmp/result.json
 
-      - name: Read result
-        id: result
-        run: |
-          RESULT=$(cat /tmp/result.json)
-          echo "json<<EOF" >> $GITHUB_OUTPUT
-          echo "$RESULT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
       - name: POST result to callback
+        env:
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
         run: |
-          curl -X POST "${{ github.event.client_payload.callbackUrl }}" \
+          jq -n --arg hash "$PAYLOAD_HASH" --slurpfile result /tmp/result.json \
+            '{hash: $hash, result: $result[0]}' > /tmp/callback.json
+          curl -fsS -X POST "$PAYLOAD_CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
-            -d "{\"hash\":\"${{ github.event.client_payload.hash }}\",\"result\":$(cat /tmp/result.json)}"
+            -H "X-Callback-Secret: $CALLBACK_SECRET" \
+            --data-binary @/tmp/callback.json
 
       - name: POST failure to callback
         if: failure()
+        env:
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
         run: |
-          curl -X POST "${{ github.event.client_payload.callbackUrl }}" \
+          # Never send the callback secret to a URL that failed the payload check.
+          if [[ ! "$PAYLOAD_CALLBACK_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/api/callback$ ]] || [[ ! "$PAYLOAD_HASH" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "::warning::Skipping failure callback: invalid callback URL or hash"
+            exit 0
+          fi
+          jq -n --arg hash "$PAYLOAD_HASH" \
+            '{hash: $hash, error: "Validation job failed. Check GitHub Actions logs."}' > /tmp/callback.json
+          curl -fsS -X POST "$PAYLOAD_CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
-            -d "{\"hash\":\"${{ github.event.client_payload.hash }}\",\"error\":\"Validation job failed. Check GitHub Actions logs.\"}"
+            -H "X-Callback-Secret: $CALLBACK_SECRET" \
+            --data-binary @/tmp/callback.json
