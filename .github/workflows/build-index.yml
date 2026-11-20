@@ -10,7 +10,7 @@ permissions:
 
 env:
   # Published CLI version (https://www.npmjs.com/package/@gefyra/complies-with-eu).
-  CLI_VERSION: 2.0.2
+  CLI_VERSION: 2.1.0
 
 jobs:
   build-index:
