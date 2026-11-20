@@ -76,15 +76,18 @@ jobs:
       - name: Install complies-with-eu
         run: npm install -g "@gefyra/complies-with-eu@${CLI_VERSION}"
 
+      # stderr of the CLI steps is also kept in /tmp/cli-stderr.log so that the
+      # failure callback can pass the real error message on to the web UI.
       - name: Init (download tools and EU packages)
-        run: complies-with-eu init
+        run: complies-with-eu init 2> >(tee -a /tmp/cli-stderr.log >&2)
 
       - name: Run validation
         run: |
           complies-with-eu validate "$PAYLOAD_PACKAGE" "$PAYLOAD_CANONICAL" \
             --eu-profiles "$PAYLOAD_EU_PROFILES" \
             --json \
-            --output /tmp/result.json
+            --output /tmp/result.json \
+            2> >(tee -a /tmp/cli-stderr.log >&2)
 
       - name: POST result to callback
         env:
@@ -107,8 +110,30 @@ jobs:
             echo "::warning::Skipping failure callback: invalid callback URL or hash"
             exit 0
           fi
-          jq -n --arg hash "$PAYLOAD_HASH" \
-            '{hash: $hash, error: "Validation job failed. Check GitHub Actions logs."}' > /tmp/callback.json
+          strip_ansi() { sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/\r$//'; }
+
+          # Error message: everything from the last "Error:" line the CLI printed,
+          # otherwise the last lines of its stderr. Runner-local paths are dropped.
+          msg=""
+          if [ -s /tmp/cli-stderr.log ]; then
+            clean=$(strip_ansi < /tmp/cli-stderr.log || true)
+            msg=$(printf '%s\n' "$clean" | awk '/^Error:/{buf=""; on=1} on{buf=buf $0 "\n"} END{printf "%s", buf}' || true)
+            [ -n "$msg" ] || msg=$(printf '%s\n' "$clean" | grep -v '^[[:space:]]*$' | tail -n 15 || true)
+            msg=$(printf '%s\n' "$msg" | grep -v '^Full fhir-pkg-tool output:' || true)
+          fi
+          [ -n "$msg" ] || msg="Validation job failed before the validator produced any output."
+
+          # Details: the fhir-pkg-tool log, but only if that tool caused the failure
+          # (the file always holds the output of its last run, successful or not).
+          details=""
+          pkg_log="$HOME/.complies-with-eu/logs/fhir-pkg-tool.log"
+          if [[ "$msg" == *fhir-pkg-tool* || "$msg" == *"FHIR package registry"* ]] && [ -s "$pkg_log" ]; then
+            details=$(strip_ansi < "$pkg_log" | grep -v '^[[:space:]]*at ' | tail -n 80 | tail -c 6000 || true)
+          fi
+
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          jq -n --arg hash "$PAYLOAD_HASH" --arg error "${msg:0:2000}" --arg details "$details" --arg runUrl "$run_url" \
+            '{hash: $hash, error: $error, runUrl: $runUrl} + (if $details != "" then {details: $details} else {} end)' > /tmp/callback.json
           curl -fsS -X POST "$PAYLOAD_CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "X-Callback-Secret: $CALLBACK_SECRET" \
